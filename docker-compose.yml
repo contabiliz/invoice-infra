@@ -1,0 +1,190 @@
+# Local development stack — contabiliz/invoice-infra
+#
+# Prerequisites:
+#   supabase start        ← runs its own Docker; exposed on host ports
+#   cp .env.example .env  ← fill SUPABASE_* values from `supabase status`
+#
+# Quick start:
+#   supabase start
+#   export GITHUB_TOKEN=$(uv run scripts/github_app_token.py)
+#   docker compose up -d --build
+#
+# Pipeline services (optional — start with --profile):
+#   consumer          → docker compose --profile consumer up
+#   workers           → docker compose --profile workers up
+#   consumer+workers  → docker compose --profile consumer --profile workers up
+
+x-pipeline-worker: &pipeline-worker
+  build:
+    context: ..                                    # contabiliz/ — includes invoice-processors
+    dockerfile: invoice-pipeline/Dockerfile
+    secrets:
+      - github_token
+  env_file: .env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  tmpfs:
+    - /tmp:size=512m,mode=1777
+
+# Common pipeline env vars — merged into each service's environment block.
+# Pipeline uses SUPABASE_STORAGE_URL / STORAGE_BUCKET; infra .env uses
+# SUPABASE_URL / SUPABASE_STORAGE_BUCKET — mapped here to avoid duplication.
+x-pipeline-env: &pipeline-env
+  DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  SUPABASE_STORAGE_URL: ${SUPABASE_URL:-http://host.docker.internal:54321}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+  STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-invoices}
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  invoice-api:
+    build:
+      context: ../invoice-api
+      secrets:
+        - github_token
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:-http://host.docker.internal:54321}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-invoices}
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      DATABASE_DIRECT_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      REDIS_URL: redis://redis:6379
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ENVIRONMENT: local
+      DB_SSL: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Pipeline consumer ────────────────────────────────────────────────────
+
+  consumer:
+    <<: *pipeline-worker
+    profiles: [consumer]
+    command: ["python", "-m", "invoice_pipeline.consumer"]
+    environment:
+      <<: *pipeline-env
+
+  # ── Pipeline workers ─────────────────────────────────────────────────────
+  # Concurrency is reduced from production values for local dev.
+
+  worker-xml:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - worker
+      - --queues=queue.xml
+      - --pool=gevent
+      - --concurrency=10
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+
+  worker-pdf:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - worker
+      - --queues=queue.pdf
+      - --pool=prefork
+      - --concurrency=2
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+
+  worker-img:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - worker
+      - --queues=queue.img
+      - --pool=gevent
+      - --concurrency=10
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+      # GEMINI_API_KEY and GEMINI_RATE_LIMIT_RPM come from .env
+
+  worker-dlq:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - worker
+      - --queues=queue.dlq
+      - --pool=prefork
+      - --concurrency=2
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+
+  worker-promotion:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - worker
+      - --queues=queue.promotion
+      - --pool=prefork
+      - --concurrency=2
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+
+  celery-beat:
+    <<: *pipeline-worker
+    profiles: [workers]
+    command:
+      - celery
+      - -A
+      - invoice_pipeline.celery_app
+      - beat
+      - --schedule=/tmp/celerybeat-schedule
+      - --loglevel=info
+    environment:
+      <<: *pipeline-env
+
+volumes:
+  redis-data:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
