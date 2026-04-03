@@ -118,8 +118,8 @@ CREATE TABLE public.entidades (
 );
 
 COMMENT ON TABLE public.entidades IS
-    'Deduplicated registry of fiscal entities (CNPJ/CPF). Shared across all tenants.
-     documento is the normalized 14-digit CNPJ or 11-digit CPF (digits only, no punctuation).';
+    'Deduplicated registry of Brazilian companies (CNPJ onlye). Shared across all tenants.
+     documento is the normalized 14-digit CNPJ, digits only. Populated by the promotion job.';
 
 -- invoices
 CREATE TABLE public.invoices (
@@ -127,7 +127,11 @@ CREATE TABLE public.invoices (
     document_id               UUID NOT NULL REFERENCES public.documents (id),
     user_id                   UUID NOT NULL REFERENCES public.users (id) ON DELETE CASCADE,
     cnpj_emitente             TEXT NOT NULL REFERENCES public.entidades (documento),
-    documento_destinatario    TEXT NOT NULL REFERENCES public.entidades (documento),
+
+    destinatario_cnpj         TEXT REFERENCES public.entidades (documento),
+    destinatario_cpf          TEXT,
+    destinatario_nome         TEXT NOT NULL,
+
     data_emissao              DATE NOT NULL,
     numero_nota               TEXT NOT NULL,
     serie                     TEXT NOT NULL,
@@ -135,6 +139,11 @@ CREATE TABLE public.invoices (
     doc_type                  TEXT NOT NULL CHECK (doc_type IN ('xml', 'pdf', 'img')),
     confidence                SMALLINT CHECK (confidence BETWEEN 0 AND 100),
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+
+    CONSTRAINT invoices_destinatario_exactly_one CHECK (
+        (destinatario_cnpj IS NOT NULL)::int +
+        (destinatario_cpf IS NOT NULL)::int = 1
+    )
 );
 
 COMMENT ON TABLE public.invoices IS
@@ -143,7 +152,8 @@ COMMENT ON TABLE public.invoices IS
 
 CREATE INDEX idx_invoices_user_id                 ON public.invoices (user_id);
 CREATE INDEX idx_invoices_cnpj_emitente           ON public.invoices (cnpj_emitente);
-CREATE INDEX idx_invoices_documento_destinatario  ON public.invoices (documento_destinatario);
+CREATE INDEX idx_invoices_destinatario_cnpj       ON public.invoices (destinatario_cnpj);
+CREATE INDEX idx_invoices_destinatario_cpf        ON public.invoices (destinatario_cpf) WHERE destinatario_cpf IS NOT NULL;
 CREATE INDEX idx_invoices_data_emissao            ON public.invoices (data_emissao);
 CREATE INDEX idx_invoices_document_id             ON public.invoices (document_id);
 
@@ -157,6 +167,8 @@ CREATE TABLE public.invoice_items (
     descricao        TEXT NOT NULL,
     ncm              TEXT NOT NULL,
     cfop             TEXT NOT NULL,
+    cst_csosn         TEXT NOT NULL,
+    new_cfop         TEXT,
     unidade          TEXT NOT NULL,
     quantidade       NUMERIC(15, 4),
     valor_unitario   NUMERIC(15, 4),
