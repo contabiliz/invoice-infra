@@ -118,7 +118,7 @@ services:
       - worker
       - --queues=queue.pdf
       - --pool=prefork
-      - --concurrency=2
+      - --concurrency=6
       - --loglevel=info
     environment:
       <<: *pipeline-env
@@ -163,9 +163,11 @@ services:
       - invoice_pipeline.celery_app
       - worker
       - --queues=queue.promotion
-      - --pool=prefork
-      - --concurrency=2
+      - --pool=solo
+      - --concurrency=1
       - --loglevel=info
+    deploy:
+      replicas: 4
     environment:
       <<: *pipeline-env
 
